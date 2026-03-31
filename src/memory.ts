@@ -50,7 +50,7 @@ export function createAlchemystMemoryClient(
   config: AlchemystPluginConfig,
   sessionId: string,
 ): AlchemystMemoryClient {
-  const apiKey = config.apiKey ?? process.env['ALCHEMYST_API_KEY'];
+  const apiKey = config.apiKey ?? process.env.ALCHEMYST_API_KEY;
   if (!apiKey) {
     throw new Error(
       '[AlchemystPlugin] Missing API key. ' +
@@ -58,12 +58,16 @@ export function createAlchemystMemoryClient(
     );
   }
 
-  // Lazy import — avoids issues in environments that load the plugin before
-  // the module graph is fully resolved, and keeps startup fast.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { AlchemystAI } = require('@alchemystai/sdk');
+  // Lazy-loaded SDK instance — initialised on first use via dynamic import().
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sdk: any = new AlchemystAI({ apiKey });
+  let sdk: any = null;
+  async function getSDK() {
+    if (!sdk) {
+      const { AlchemystAI } = await import('@alchemystai/sdk');
+      sdk = new AlchemystAI({ apiKey });
+    }
+    return sdk;
+  }
 
   const userId = config.userId ?? 'anonymous';
   const similarityThreshold = 0.5;
@@ -72,7 +76,7 @@ export function createAlchemystMemoryClient(
   const log: PluginLogger = config.logger ?? console;
 
   /** Canonical source identifier for documents stored in this session. */
-  const source = `alchemyst-livekit::${userId}::${sessionId}`;
+  const source = `${sessionId}`;
 
   /** Track whether we've already created the memory document for this session. */
   let memoryInitialised = false;
@@ -85,7 +89,8 @@ export function createAlchemystMemoryClient(
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const raw: any = await sdk.v1.context.search({
+      const client = await getSDK();
+      const raw: any = await client.v1.context.search({
         query,
         similarity_threshold: similarityThreshold,
         minimum_similarity_threshold: similarityThreshold,
@@ -145,9 +150,11 @@ export function createAlchemystMemoryClient(
       metadata: { messageId: `${sessionId}-turn-${turnCount}-assistant` },
     };
 
+    const client = await getSDK();
+
     if (!memoryInitialised) {
       // First turn — create the memory document for this session
-      await sdk.v1.context.memory.add({
+      await client.v1.context.memory.add({
         sessionId,
         contents: [userContent, assistantContent],
         metadata: {
@@ -161,7 +168,7 @@ export function createAlchemystMemoryClient(
       );
     } else {
       // Subsequent turns — append to the same session document
-      await sdk.v1.context.memory.update({
+      await client.v1.context.memory.update({
         sessionId,
         contents: [userContent, assistantContent],
       });
@@ -174,18 +181,18 @@ export function createAlchemystMemoryClient(
 
 
   async function deleteMemory(memoryIdOrSource: string): Promise<void> {
-    await sdk.v1.context.delete({
-      source: memoryIdOrSource,
-      by_doc: true,
+    const client = await getSDK();
+    await client.v1.context.memory.delete({
+      memoryId: source,
     });
 
     log.debug(`[AlchemystPlugin] deleted memory — ${memoryIdOrSource}`);
   }
 
   async function deleteSession(): Promise<void> {
-    await sdk.v1.context.delete({
-      source,
-      by_doc: false,
+    const client = await getSDK();
+    await client.v1.context.memory.delete({
+      memoryId: source,
     });
 
     log.info(

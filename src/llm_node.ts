@@ -31,6 +31,7 @@
  * ```
  */
 
+import type { ReadableStream as NodeReadableStream } from 'stream/web';
 import { llm } from '@livekit/agents';
 import type { AlchemystMemoryClient } from './memory.js';
 import { MEMORY_SYSTEM_PROMPT_TEMPLATE, type PluginLogger } from './types.js';
@@ -40,7 +41,7 @@ export type LLMNodeFunc = (
   chatCtx: llm.ChatContext,
   toolCtx: llm.ToolContext,
   modelSettings: { toolChoice?: llm.ToolChoice },
-) => Promise<ReadableStream<llm.ChatChunk | string> | null>;
+) => Promise<NodeReadableStream<llm.ChatChunk | string> | null>;
 
 export interface LLMNodeOptions {
   /** Override the memory system prompt template for this node only. */
@@ -95,7 +96,7 @@ function buildMemoryPrompt(memories: string[], template: string): string {
 function streamToReadable(
   liveKitStream: llm.LLMStream,
   onComplete: (text: string) => void,
-): ReadableStream<llm.ChatChunk | string> {
+): NodeReadableStream<llm.ChatChunk | string> {
   const iter: AsyncIterator<llm.ChatChunk> = liveKitStream[Symbol.asyncIterator]();
   let accumulated = '';
   let finished = false;
@@ -147,7 +148,7 @@ export function createAlchemystLLMNode(
     chatCtx: llm.ChatContext,
     toolCtx: llm.ToolContext,
     modelSettings: { toolChoice?: llm.ToolChoice },
-  ): Promise<ReadableStream<llm.ChatChunk | string> | null> => {
+  ): Promise<NodeReadableStream<llm.ChatChunk | string> | null> => {
     // ------------------------------------------------------------------
     // 1. Extract last user utterance
     // ------------------------------------------------------------------
