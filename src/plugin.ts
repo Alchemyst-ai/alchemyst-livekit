@@ -3,45 +3,66 @@
  *
  * The main entry point for `livekit-plugin-alchemyst`.
  *
- * Usage (LiveKit Agents 1.x `Agent` class pattern):
+ * ## Recommended: `onUserTurnCompleted` pattern (RAG injection)
  *
  * ```ts
  * import { createAlchemystPlugin } from 'livekit-plugin-alchemyst';
- * import { Agent, JobContext, WorkerOptions, cli, defineAgent } from '@livekit/agents';
- * import type { ChatContext, ToolContext, ModelSettings } from '@livekit/agents';
- * import * as openai from '@livekit/agents-plugin-openai';
+ * import { defineAgent, inference, voice, llm } from '@livekit/agents';
  *
  * const alchemyst = createAlchemystPlugin({ apiKey: process.env.ALCHEMYST_API_KEY });
  *
- * class VoiceAgent extends Agent {
+ * class MyAgent extends voice.Agent {
  *   constructor() {
  *     super({
  *       instructions: 'You are a helpful voice assistant.',
- *       llm: new openai.LLM({ model: 'gpt-4o' }),
- *       tools: alchemyst.getTools(),   // remember / recall / forget
+ *       tools: alchemyst.getTools(),
  *     });
  *   }
  *
- *   // Intercept llm_node to inject memories before every LLM call
- *   override async llmNode(
- *     chatCtx: ChatContext,
- *     toolCtx: ToolContext,
- *     modelSettings: ModelSettings,
- *   ) {
- *     return alchemyst.createLLMNode(this.llm!)(chatCtx, toolCtx, modelSettings);
+ *   override async onUserTurnCompleted(
+ *     turnCtx: llm.ChatContext,
+ *     newMessage: llm.ChatMessage,
+ *   ): Promise<void> {
+ *     const userText = newMessage.textContent;
+ *     if (!userText) return;
+ *     const memories = await alchemyst.search(userText);
+ *     if (memories.length > 0) {
+ *       turnCtx.addMessage({
+ *         role: 'system',
+ *         content: memories.map((m, i) => `${i + 1}. ${m.content}`).join('\n'),
+ *       });
+ *     }
  *   }
  * }
  *
  * export default defineAgent({
- *   entry: async (ctx: JobContext) => {
+ *   entry: async (ctx) => {
  *     await ctx.connect();
- *     const identity = ctx.room.remoteParticipants.values().next().value?.identity;
- *     alchemyst.bindSession(ctx.room.name, identity);
- *     const agent = new VoiceAgent();
- *     await agent.start(ctx.room).waitForDisconnection();
+ *     alchemyst.bindSession(ctx.room.name!, participant.identity);
+ *     const session = new voice.AgentSession({
+ *       llm: new inference.LLM({ model: 'openai/gpt-4.1-mini' }),
+ *     });
+ *     await session.start({ room: ctx.room, agent: new MyAgent() });
+ *
+ *     // Auto-persist turns
+ *     let lastUserText: string | null = null;
+ *     session.on('conversation_item_added', (ev) => {
+ *       if (ev.item.role === 'user') lastUserText = ev.item.textContent ?? null;
+ *       else if (ev.item.role === 'assistant' && lastUserText && ev.item.textContent) {
+ *         alchemyst.addTurn(lastUserText, ev.item.textContent).catch(console.error);
+ *         lastUserText = null;
+ *       }
+ *     });
  *   },
  * });
  * ```
+ *
+ * ## Alternative: `llmNode` override (advanced)
+ *
+ * For full control over the LLM call, use `createLLMNode()` to override
+ * the pipeline's `llmNode`. This manages its own LLM stream and handles
+ * both memory injection and turn persistence internally.
+ * See {@link createAlchemystLLMNode} in `llm_node.ts` for details.
  */
 
 import { llm } from '@livekit/agents';
@@ -106,7 +127,7 @@ export function createAlchemystPlugin(
   }
 
   // -------------------------------------------------------------------------
-  // Primary integration — override llmNode in your Agent subclass
+  // LLM node override (advanced — most users should use onUserTurnCompleted)
   // -------------------------------------------------------------------------
 
   function makeLLMNode(innerLLM: llm.LLM, opts: LLMNodeOptions = {}): LLMNodeFunc {
