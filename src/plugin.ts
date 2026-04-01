@@ -68,6 +68,8 @@ export interface AlchemystPluginInstance {
   createLLMNode(innerLLM: llm.LLM, opts?: LLMNodeOptions): LLMNodeFunc;
   getTools(): AlchemystFunctionContext;
   search(query: string): ReturnType<AlchemystMemoryClient['search']>;
+  /** Persist a completed user/assistant turn to memory. */
+  addTurn(userText: string, assistantText: string): Promise<void>;
   delete(memoryIdOrSource: string): Promise<void>;
   deleteSession(): Promise<void>;
 }
@@ -77,7 +79,7 @@ export function createAlchemystPlugin(
 ): AlchemystPluginInstance {
   const log: PluginLogger = config.logger ?? console;
   const resolvedMemoryTemplate =
-    config.memorySystemPromptTemplate ?? MEMORY_SYSTEM_PROMPT_TEMPLATE;
+  config.memorySystemPromptTemplate ?? MEMORY_SYSTEM_PROMPT_TEMPLATE;
   const resolvedAutoPersist = config.autoPersist ?? true;
 
   const initialSessionId = config.sessionId ?? generateSessionId();
@@ -125,6 +127,14 @@ export function createAlchemystPlugin(
     return memory.search(query);
   }
 
+  async function addTurn(userText: string, assistantText: string) {
+    return memory.add({
+      user: userText,
+      assistant: assistantText,
+      sessionId: memory.currentSessionId,
+    });
+  }
+
   async function deleteMemory(memoryIdOrSource: string) {
     return memory.delete(memoryIdOrSource);
   }
@@ -148,6 +158,7 @@ export function createAlchemystPlugin(
     createLLMNode: makeLLMNode,
     getTools,
     search,
+    addTurn,
     delete: deleteMemory,
     deleteSession,
   };
@@ -160,3 +171,5 @@ function generateSessionId(): string {
   const rnd = Math.random().toString(36).slice(2, 9);
   return `alchemyst-${ts}-${rnd}`;
 }
+
+

@@ -41,7 +41,7 @@ export { createAlchemystPlugin, type AlchemystPluginInstance } from './plugin.js
 // Memory client (for advanced use / testing)
 export { createAlchemystMemoryClient, type AlchemystMemoryClient } from './memory.js';
 
-// LLM-node primitives
+// LLM-node primitives advance usage
 export {
   createAlchemystLLMNode,
   getLastUserText,

@@ -50,7 +50,7 @@ export function createAlchemystMemoryClient(
   config: AlchemystPluginConfig,
   sessionId: string,
 ): AlchemystMemoryClient {
-  const apiKey = config.apiKey ?? process.env.ALCHEMYST_API_KEY;
+  const apiKey = config.apiKey ??process.env.ALCHEMYST_API_KEY;
   if (!apiKey) {
     throw new Error(
       '[AlchemystPlugin] Missing API key. ' +
@@ -95,6 +95,10 @@ export function createAlchemystMemoryClient(
         similarity_threshold: similarityThreshold,
         minimum_similarity_threshold: similarityThreshold,
         mode: 'fast',
+        scope: 'internal',
+        body_metadata: {
+          groupName: groupNames,
+        },
       });
 
       // The SDK returns { statusText, contexts: [...] }

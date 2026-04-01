@@ -1,34 +1,34 @@
 /**
- * createAlchemystLLMNode
+ * createAlchemystLLMNode (Advanced)
  *
- * Factory that produces a LiveKit Agents `LLMNode` function.
+ * Factory that produces a LiveKit Agents `LLMNode` function for users who
+ * need full control over the LLM call pipeline.
+ *
+ * **For most use cases, prefer the `onUserTurnCompleted` hook instead.**
+ * See the plugin's main JSDoc or `examples/agent.ts` for the recommended
+ * pattern. This module is provided for advanced scenarios where you need
+ * to intercept and transform the LLM stream directly.
  *
  * The returned function:
  *  1. Extracts the last user utterance from the ChatContext.
- *  2. Performs an Alchemyst memory recall in parallel with (or before) the
- *     LLM call.
- *  3. Injects relevant memories as a scoped system message, inserted at
- *     position 0 so the model sees it at the start of the context window.
+ *  2. Performs an Alchemyst memory recall.
+ *  3. Injects relevant memories as a system message at position 0.
  *  4. Calls the inner LLM and pipes its stream through as a ReadableStream.
- *  5. After the stream ends, asynchronously persists the completed
- *     user/assistant turn (fire-and-forget; errors are logged, never thrown).
+ *  5. After the stream ends, persists the completed turn (fire-and-forget).
  *
  * Usage inside an Agent subclass:
  *
  * ```ts
- * import { voice } from '@livekit/agents';
- * import type { ChatContext, ToolContext, ModelSettings } from '@livekit/agents/llm';
- *
- * class VoiceAgent extends Agent {
- *   override async llmNode(
- *     chatCtx: ChatContext,
- *     toolCtx: ToolContext,
- *     modelSettings: ModelSettings,
- *   ) {
- *     return this.plugin.createLLMNode(this.llm!)(chatCtx, toolCtx, modelSettings);
+ * class VoiceAgent extends voice.Agent {
+ *   override async llmNode(chatCtx, toolCtx, modelSettings) {
+ *     return alchemyst.createLLMNode(myLLM)(chatCtx, toolCtx, modelSettings);
  *   }
  * }
  * ```
+ *
+ * **Note:** This approach manages its own `innerLLM.chat()` call — the LLM
+ * passed to `AgentSession` is bypassed. Make sure you pass the same LLM
+ * instance to both, or use this as the sole LLM entry point.
  */
 
 import type { ReadableStream as NodeReadableStream } from 'stream/web';
@@ -50,13 +50,7 @@ export interface LLMNodeOptions {
   autoPersist?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
-/**
- * Return the text content of the most recent user message, or `null` if none.
- */
 export function getLastUserText(chatCtx: llm.ChatContext): string | null {
   const items = [...chatCtx.items].reverse();
   for (const item of items) {
@@ -67,9 +61,7 @@ export function getLastUserText(chatCtx: llm.ChatContext): string | null {
   return null;
 }
 
-/**
- * Return the text content of the most recent assistant message, or `null`.
- */
+
 export function getLastAssistantText(chatCtx: llm.ChatContext): string | null {
   const items = [...chatCtx.items].reverse();
   for (const item of items) {
@@ -80,56 +72,46 @@ export function getLastAssistantText(chatCtx: llm.ChatContext): string | null {
   return null;
 }
 
-/**
- * Build the memory system prompt from the template and an ordered list of
- * memory content strings.
- */
+
 function buildMemoryPrompt(memories: string[], template: string): string {
   const numbered = memories.map((m, i) => `${i + 1}. ${m}`).join('\n');
   return template.replace('{{memories}}', numbered);
 }
 
-/**
- * Convert an LLMStream (AsyncIterableIterator<ChatChunk>) to a Web API
- * ReadableStream<ChatChunk | string>, accumulating text for persistence.
- */
+
 function streamToReadable(
   liveKitStream: llm.LLMStream,
   onComplete: (text: string) => void,
 ): NodeReadableStream<llm.ChatChunk | string> {
-  const iter: AsyncIterator<llm.ChatChunk> = liveKitStream[Symbol.asyncIterator]();
   let accumulated = '';
-  let finished = false;
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    liveKitStream.close();
+  };
 
   return new ReadableStream<llm.ChatChunk | string>({
-    async pull(controller) {
-      if (finished) return;
+    async start(controller) {
       try {
-        const result = await iter.next();
-        if (result.done) {
-          finished = true;
-          controller.close();
-          onComplete(accumulated);
-        } else {
-          // Accumulate text delta
-          accumulated += result.value.delta?.content ?? '';
-          controller.enqueue(result.value);
+        for await (const chunk of liveKitStream) {
+          accumulated += chunk.delta?.content ?? '';
+          controller.enqueue(chunk);
         }
+        controller.close();
+        onComplete(accumulated);
       } catch (err) {
-        finished = true;
         controller.error(err);
+      } finally {
+        cleanup();
       }
     },
     cancel() {
-      finished = true;
-      iter.return?.();
+      cleanup();
     },
   });
 }
 
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
 
 export function createAlchemystLLMNode(
   innerLLM: llm.LLM,
@@ -149,54 +131,47 @@ export function createAlchemystLLMNode(
     toolCtx: llm.ToolContext,
     modelSettings: { toolChoice?: llm.ToolChoice },
   ): Promise<NodeReadableStream<llm.ChatChunk | string> | null> => {
-    // ------------------------------------------------------------------
-    // 1. Extract last user utterance
-    // ------------------------------------------------------------------
+   
     const userText = getLastUserText(chatCtx);
 
-    // ------------------------------------------------------------------
-    // 2. Recall + inject memories
-    // ------------------------------------------------------------------
     let enrichedCtx = chatCtx;
 
     if (userText) {
-      const memories = await memory.search(userText);
+      try {
+        const memories = await memory.search(userText);
 
-      if (memories.length > 0) {
-        const systemText = buildMemoryPrompt(
-          memories.map((m) => m.content),
-          template,
-        );
+        if (memories.length > 0) {
+          const systemText = buildMemoryPrompt(
+            memories.map((m) => m.content),
+            template,
+          );
 
-        enrichedCtx = chatCtx.copy();
-        // Insert with createdAt: 0 so it sorts to position 0 —
-        // before the agent instructions and conversation history.
-        enrichedCtx.insert(
-          llm.ChatMessage.create({
-            role: 'system',
-            content: systemText,
-            createdAt: 0,
-          }),
-        );
+          enrichedCtx = chatCtx.copy();
+          // Insert with createdAt: 0 so it sorts to position 0 —
+          // before the agent instructions and conversation history.
+          enrichedCtx.insert(
+            llm.ChatMessage.create({
+              role: 'system',
+              content: systemText,
+              createdAt: 0,
+            }),
+          );
 
-        log.debug(
-          `[AlchemystPlugin] injected ${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} into llmNode`,
-        );
+          log.debug(
+            `[AlchemystPlugin] injected ${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} into llmNode`,
+          );
+        }
+      } catch (err) {
+        log.warn(`[AlchemystPlugin] memory injection skipped — ${String(err)}`);
       }
     }
 
-    // ------------------------------------------------------------------
-    // 3. Call the inner LLM
-    // ------------------------------------------------------------------
     const hasTools = Object.keys(toolCtx).length > 0;
     const chatOpts: Parameters<llm.LLM['chat']>[0] = { chatCtx: enrichedCtx };
     if (hasTools) chatOpts.toolCtx = toolCtx;
     if (modelSettings.toolChoice !== undefined) chatOpts.toolChoice = modelSettings.toolChoice;
     const liveKitStream = innerLLM.chat(chatOpts);
 
-    // ------------------------------------------------------------------
-    // 4. Pipe through a ReadableStream, collecting text for persistence
-    // ------------------------------------------------------------------
     const readable = streamToReadable(liveKitStream, (assistantText) => {
       if (autoPersist && userText && assistantText) {
         memory
