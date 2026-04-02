@@ -90,25 +90,56 @@ export function createAlchemystMemoryClient(
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const client = await getSDK();
-      const raw: any = await client.v1.context.search({
-        query,
-        similarity_threshold: similarityThreshold,
-        minimum_similarity_threshold: similarityThreshold,
-        mode: 'fast',
-        scope: 'internal',
-        body_metadata: {
-          groupName: groupNames,
-        },
-      });
 
-      // The SDK returns { statusText, contexts: [...] }
-      const contexts: ContextSearchResult[] = Array.isArray(raw?.contexts)
-        ? raw.contexts
-        : Array.isArray(raw)
-          ? raw
-          : [];
+      // Run both a scoped search (session/user memories) and a general search
+      // (directly uploaded context) in parallel, then merge & deduplicate.
+      const [scopedRaw, generalRaw]: [any, any] = await Promise.all([
+        client.v1.context.search({
+          query,
+          similarity_threshold: similarityThreshold,
+          minimum_similarity_threshold: similarityThreshold,
+          mode: 'fast',
+          scope: 'internal',
+          body_metadata: {
+            groupName: [...groupNames, userId],
+          },
+        }),
+        client.v1.context.search({
+          query,
+          similarity_threshold: similarityThreshold,
+          minimum_similarity_threshold: similarityThreshold,
+          mode: 'fast',
+          scope: 'internal',
+        }),
+      ]);
 
-      const entries = contexts
+      const extractContexts = (raw: any): ContextSearchResult[] =>
+        Array.isArray(raw?.contexts)
+          ? raw.contexts
+          : Array.isArray(raw)
+            ? raw
+            : [];
+
+      const allContexts = [
+        ...extractContexts(scopedRaw),
+        ...extractContexts(generalRaw),
+      ];
+
+      // Deduplicate by content, keeping the higher-similarity entry
+      const seen = new Map<string, ContextSearchResult>();
+      for (const ctx of allContexts) {
+        const key = ctx.content ?? ctx.text ?? '';
+        if (!key) continue;
+        const existing = seen.get(key);
+        const sim = ctx.similarity ?? ctx.similarity_score ?? 0;
+        const existingSim = existing?.similarity ?? existing?.similarity_score ?? 0;
+        if (!existing || sim > existingSim) {
+          seen.set(key, ctx);
+        }
+      }
+
+      const entries = [...seen.values()]
+        .sort((a, b) => (b.similarity ?? b.similarity_score ?? 0) - (a.similarity ?? a.similarity_score ?? 0))
         .slice(0, maxMemories)
         .map((r): MemoryEntry => {
           const entry: MemoryEntry = { content: r.content ?? r.text ?? '' };
@@ -120,9 +151,7 @@ export function createAlchemystMemoryClient(
           return entry;
         })
         .filter((e) => e.content.length > 0);
-      
-      // console.log("raw entries : ", results);
-        
+
       log.debug(
         `[AlchemystPlugin] recall: ${entries.length} result(s) for "${query.slice(0, 60)}"`,
       );
